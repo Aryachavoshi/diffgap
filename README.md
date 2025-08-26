@@ -1,5 +1,4 @@
 # diffgap
-
 diffgap/
 ├─ pyproject.toml
 ├─ README.md
