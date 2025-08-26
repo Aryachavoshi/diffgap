@@ -72,17 +72,18 @@ class DiffusionSampler(nn.Module):
         for i, t in enumerate(schedule_ts):
             t_idx_scalar = int(t.item())
             t_tensor = torch.full((revealed_image.size(0),), t_idx_scalar, device=self.device, dtype=torch.long)
-
+            print(f"=== Outer step {i+1}/{len(schedule_ts)}, t={t_idx_scalar} ===")
             x_t = x_t.detach().requires_grad_(True)
 
             # inner gradient descent to match revealed pixels in x0
-            for _ in range(grad_steps):
+            for g in range(grad_steps):
                 with amp_ctx():
                     eps_pred = self.trained_model(x_t, t_tensor).sample
                     x0_pred  = self.eps_to_x0(x_t, t_idx_scalar, eps_pred)
                     pred_revealed = x0_pred * mask
                     loss = ((pred_revealed - revealed_image) ** 2).sum() / (mask.sum() + 1e-8)
-
+                    
+                print(f"   Grad step {g+1}/{grad_steps} | loss={loss.item():.6f}")
                 loss.backward()
                 with torch.no_grad():
                     x_t -= learning_rate * x_t.grad
@@ -103,5 +104,6 @@ class DiffusionSampler(nn.Module):
 
             if (i % max(1, return_intermediates_every) == 0) or (t_idx_scalar == 99):
                 intermediates.append(x_t.detach().cpu().clone())
+            print(f"   Scheduler step done for t={t_idx_scalar}")
 
         return x_t.detach(), intermediates
