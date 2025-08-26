@@ -13,7 +13,7 @@ def apply_region(mask: Optional[torch.Tensor], region: Literal["all","revealed",
     if region == "revealed":
         return x * mask
     if region == "hole":
-        return x * (1.0 - mask)
+        return x * (~mask)
     raise ValueError(f"Unknown region: {region}")
 
 def data_range_from_normalization(norm: Literal["0_1","-1_1","custom"], vmin=0.0, vmax=1.0):
