@@ -1,5 +1,4 @@
 # diffgap
-Repository layout
 
 diffgap/
 ├─ pyproject.toml
