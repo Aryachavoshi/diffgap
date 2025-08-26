@@ -82,6 +82,3 @@ def compare_methods_fixed(
     return pd.DataFrame(rows, columns=[
         "method","RMSE_mean","RMSE_std","PSNR_mean","PSNR_std","SSIM_mean","SSIM_std","N","region"
     ])
-
-# Monkey-patch
-M.compare_methods = compare_methods_fixed
