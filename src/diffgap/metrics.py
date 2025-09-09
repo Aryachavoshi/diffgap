@@ -1,23 +1,8 @@
 from __future__ import annotations
 from typing import Dict, Optional, Literal, Tuple
-import math
 import torch
-from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
 import pandas as pd
-from .utils import apply_region, data_range_from_normalization
-
-def rmse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return torch.sqrt(torch.mean((x - y) ** 2))
-
-def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
-    mse = torch.mean((x - y) ** 2)
-    if mse <= 1e-20:
-        return torch.tensor(float("inf"), device=x.device)
-    return 20.0 * torch.log10(torch.tensor(data_range, device=x.device) / torch.sqrt(mse))
-
-def ssim(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
-    ssim_metric = SSIM(data_range=data_range)
-    return ssim_metric(x, y)
+from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
 
 def _mean_std_no_nan(t: torch.Tensor):
     t = t.detach()
@@ -33,31 +18,22 @@ def _unnormalize(
     phys_minmax: Optional[Tuple[float,float]],
     custom_minmax: Tuple[float,float]
 ) -> torch.Tensor:
-    """
-    Map normalized tensor to physical units if phys_minmax is provided.
-    Supported norms:
-      - "0_1": x in [0,1] -> x*(max-min)+min
-      - "-1_1": x in [-1,1] -> ((x+1)/2)*(max-min)+min
-    Otherwise returns x unchanged.
-    """
     if phys_minmax is None:
         return x
     lo, hi = phys_minmax
     if norm == "0_1":
         return x * (hi - lo) + lo
     elif norm in ("-1_1", "neg1_1"):
-        return ( (x + 1.0) * 0.5 ) * (hi - lo) + lo
+        return ((x + 1.0) * 0.5) * (hi - lo) + lo
     else:
-        # assume already physical if using z-score or other scheme
+        # assume already physical (e.g., z-score)
         return x
 
 def _compute_uhi(batch: torch.Tensor, urban_mask: torch.Tensor) -> torch.Tensor:
     """
-    batch: (N,1,H,W) in physical units if desired
-    urban_mask: (1,1,H,W) or (N,1,H,W); 1 for urban, 0 for rural
+    batch: (N,1,H,W) in physical units; urban_mask: (1,1,H,W) or (N,1,H,W) with 1=urban, 0=rural
     returns per-image UHI = mean(urban) - mean(rural), shape (N,)
     """
-    # Broadcast mask if given as (1,1,H,W)
     if urban_mask.dim() == 4 and urban_mask.size(0) == 1:
         m = urban_mask.expand(batch.size(0), -1, -1, -1)
     else:
@@ -66,11 +42,9 @@ def _compute_uhi(batch: torch.Tensor, urban_mask: torch.Tensor) -> torch.Tensor:
 
     urban = torch.where(m > 0.5, batch, torch.tensor(float('nan'), device=batch.device, dtype=batch.dtype))
     rural = torch.where(m <= 0.5, batch, torch.tensor(float('nan'), device=batch.device, dtype=batch.dtype))
-
-    # per-image nanmeans
     urb_mean = torch.nanmean(urban.view(batch.size(0), -1), dim=1)
     rur_mean = torch.nanmean(rural.view(batch.size(0), -1), dim=1)
-    return urb_mean - rur_mean  # (N,)
+    return urb_mean - rur_mean
 
 @torch.no_grad()
 def compare_methods_fixed(
@@ -81,14 +55,15 @@ def compare_methods_fixed(
     norm: str = "0_1",
     custom_minmax = (0.0, 1.0),
     *,
-    # --- NEW: UHI options ---
-    urban_mask: Optional[torch.Tensor] = None,        # e.g., a binary mask of shape (1,1,H,W) or (N,1,H,W)
-    uhi_phys_minmax: Optional[Tuple[float,float]] = (262.7, 333.86),  # set None to skip un-normalization
-    uhi_as_percent: bool = True,                      # compute % error vs |truth UHI|
-    uhi_eps: float = 1e-12                            # guard against division by zero
+    urban_mask: Optional[torch.Tensor] = None,
+    uhi_phys_minmax: Optional[Tuple[float,float]] = (262.7, 333.86),
+    # robust UHI error options:
+    uhi_mode: Literal["pct","abs","smape"] = "pct",
+    uhi_min_denom_k: float = 0.5,   # floor for |truth UHI| in K for pct/smape
 ) -> pd.DataFrame:
     """
-    Returns a DataFrame with RMSE/PSNR/SSIM and (optionally) UHI % error stats per method.
+    Pixel metrics computed on `region` (e.g., 'hole' or 'all').
+    UHI metrics computed on FULL frames (unmasked), independent of `region`.
     """
     from diffgap.utils import apply_region, data_range_from_normalization
     data_range = data_range_from_normalization(norm, *custom_minmax)
@@ -96,45 +71,48 @@ def compare_methods_fixed(
     rows = []
     ssim_metric = SSIM(data_range=data_range).to(truth.device)
 
-    # Precompute truth UHI if requested
+    # Prepare full-frame truth for UHI (in physical units if requested)
     if urban_mask is not None:
-        truth_phys = _unnormalize(truth, norm=norm, phys_minmax=uhi_phys_minmax, custom_minmax=custom_minmax)
-        truth_uhi = _compute_uhi(truth_phys, urban_mask)  # (N,)
+        truth_full_phys = _unnormalize(truth, norm=norm, phys_minmax=uhi_phys_minmax, custom_minmax=custom_minmax)
+        truth_uhi = _compute_uhi(truth_full_phys, urban_mask)  # (N,)
     else:
         truth_uhi = None
 
-    for name, pred in predictions.items():
-        x, y = pred.clone(), truth.clone()
+    for name, pred_full in predictions.items():
+        # ------------- Pixel metrics on region -------------
+        x_reg, y_reg = pred_full.clone(), truth.clone()
         if region != "all" and mask is not None:
-            x = apply_region(mask, region, x)
-            y = apply_region(mask, region, y)
+            x_reg = apply_region(mask, region, x_reg)
+            y_reg = apply_region(mask, region, y_reg)
 
-        # -------- Pixel-wise metrics (per-image) --------
-        per_rmse = torch.sqrt(torch.mean((x - y) ** 2, dim=(1, 2, 3)))
+        per_rmse = torch.sqrt(torch.mean((x_reg - y_reg) ** 2, dim=(1,2,3)))
 
-        def _psnr(one, two):
-            mse = torch.mean((one - two) ** 2)
+        def _psnr(a, b):
+            mse = torch.mean((a - b) ** 2)
             if mse <= 1e-20:
-                return torch.tensor(float("inf"), device=one.device)
-            return 20.0 * torch.log10(torch.tensor(data_range, device=one.device) / torch.sqrt(mse))
+                return torch.tensor(float("inf"), device=a.device)
+            return 20.0 * torch.log10(torch.tensor(data_range, device=a.device) / torch.sqrt(mse))
 
-        per_psnr = torch.stack([_psnr(x[i:i+1], y[i:i+1]) for i in range(x.size(0))]).squeeze()
-        per_ssim = torch.stack([ssim_metric(x[i:i+1], y[i:i+1]) for i in range(x.size(0))]).squeeze()
+        per_psnr = torch.stack([_psnr(x_reg[i:i+1], y_reg[i:i+1]) for i in range(x_reg.size(0))]).squeeze()
+        per_ssim = torch.stack([ssim_metric(x_reg[i:i+1], y_reg[i:i+1]) for i in range(x_reg.size(0))]).squeeze()
 
         RMSE_mean, RMSE_std = _mean_std_no_nan(per_rmse)
         PSNR_mean, PSNR_std = _mean_std_no_nan(per_psnr)
         SSIM_mean, SSIM_std = _mean_std_no_nan(per_ssim)
 
-        # -------- NEW: UHI error (per-image) --------
+        # ------------- UHI on FULL frames (not region-masked) -------------
         if truth_uhi is not None:
-            pred_phys = _unnormalize(x, norm=norm, phys_minmax=uhi_phys_minmax, custom_minmax=custom_minmax)
-            pred_uhi = _compute_uhi(pred_phys, urban_mask)  # (N,)
+            pred_full_phys = _unnormalize(pred_full, norm=norm, phys_minmax=uhi_phys_minmax, custom_minmax=custom_minmax)
+            pred_uhi = _compute_uhi(pred_full_phys, urban_mask)  # (N,)
 
-            if uhi_as_percent:
-                denom = torch.clamp(torch.abs(truth_uhi), min=uhi_eps)
+            if uhi_mode == "pct":
+                denom = torch.clamp(torch.abs(truth_uhi), min=uhi_min_denom_k)  # K
                 per_uhi_err = (pred_uhi - truth_uhi) * 100.0 / denom
-            else:
-                per_uhi_err = (pred_uhi - truth_uhi)  # absolute error in physical units
+            elif uhi_mode == "smape":
+                denom = torch.clamp(torch.abs(pred_uhi) + torch.abs(truth_uhi), min=2*uhi_min_denom_k)
+                per_uhi_err = 200.0 * torch.abs(pred_uhi - truth_uhi) / denom
+            else:  # "abs": error in K
+                per_uhi_err = (pred_uhi - truth_uhi)
 
             UHI_err_mean, UHI_err_std = _mean_std_no_nan(per_uhi_err)
         else:
@@ -145,15 +123,14 @@ def compare_methods_fixed(
             RMSE_mean=RMSE_mean, RMSE_std=RMSE_std,
             PSNR_mean=PSNR_mean, PSNR_std=PSNR_std,
             SSIM_mean=SSIM_mean, SSIM_std=SSIM_std,
-            UHI_pct_error_mean=UHI_err_mean if uhi_as_percent else float('nan'),
-            UHI_pct_error_std=UHI_err_std if uhi_as_percent else float('nan'),
-            # If you choose absolute error, you can also add columns for that case.
-            N=int(x.size(0)),
+            UHI_error_mean=UHI_err_mean,  # units depend on uhi_mode
+            UHI_error_std=UHI_err_std,
+            UHI_error_mode=uhi_mode,
+            N=int(pred_full.size(0)),
             region=region,
         ))
 
-    cols = [
+    return pd.DataFrame(rows, columns=[
         "method","RMSE_mean","RMSE_std","PSNR_mean","PSNR_std","SSIM_mean","SSIM_std",
-        "UHI_pct_error_mean","UHI_pct_error_std","N","region"
-    ]
-    return pd.DataFrame(rows, columns=cols)
+        "UHI_error_mean","UHI_error_std","UHI_error_mode","N","region"
+    ])
