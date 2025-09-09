@@ -63,9 +63,9 @@ def compare_methods_fixed(
             elif norm in ("-1_1", "neg1_1"):
                 truth_full_phys = ((truth + 1.0) * 0.5) * (hi - lo) + lo
             else:
-                truth_full_phys = truth  # assume already physical units
+                truth_full_phys = truth
         else:
-            truth_full_phys = truth  # already in physical units
+            truth_full_phys = truth
 
         # Broadcast urban mask to batch if needed
         if urban_mask.dim() == 4 and urban_mask.size(0) == 1:
@@ -73,11 +73,22 @@ def compare_methods_fixed(
         else:
             um = urban_mask.to(truth.device, truth.dtype)
 
-        # Compute truth UHI per image: mean(urban) - mean(rural)
-        truth_urban = torch.where(um > 0.5, truth_full_phys, torch.tensor(float('nan'), device=truth.device, dtype=truth.dtype))
-        truth_rural = torch.where(um <= 0.5, truth_full_phys, torch.tensor(float('nan'), device=truth.device, dtype=truth.dtype))
-        truth_uhi = torch.nanmean(truth_urban.view(truth.size(0), -1), dim=1) - \
-                    torch.nanmean(truth_rural.view(truth.size(0), -1), dim=1)
+        urb_bin = (um > 0.5)
+        rur_bin = ~urb_bin
+
+        # Validity mask to exclude NaNs/Infs from contributing to sums
+        valid_truth = torch.isfinite(truth_full_phys)
+
+        # Urban/Rural counts (per image); clamp to avoid 0-division
+        urb_count = (urb_bin & valid_truth).sum(dim=(1,2,3)).clamp(min=1)
+        rur_count = (rur_bin & valid_truth).sum(dim=(1,2,3)).clamp(min=1)
+
+        # Replace NaNs with 0 for sums; multiply by binary masks
+        truth_safe = torch.nan_to_num(truth_full_phys, nan=0.0, posinf=0.0, neginf=0.0)
+        urb_sum = (truth_safe * urb_bin).sum(dim=(1,2,3))
+        rur_sum = (truth_safe * rur_bin).sum(dim=(1,2,3))
+
+        truth_uhi = (urb_sum / urb_count) - (rur_sum / rur_count)   # (N,)
     else:
         truth_uhi = None  # no UHI metrics
 
@@ -105,7 +116,6 @@ def compare_methods_fixed(
 
         # ------------- UHI on FULL frames (not region-masked) -------------
         if truth_uhi is not None:
-            # Unnormalize prediction inline if requested
             if uhi_phys_minmax is not None:
                 lo, hi = uhi_phys_minmax
                 if norm == "0_1":
@@ -117,16 +127,18 @@ def compare_methods_fixed(
             else:
                 pred_full_phys = pred_full
 
-            # Broadcast mask like above
-            if urban_mask.dim() == 4 and urban_mask.size(0) == 1:
-                um = urban_mask.to(pred_full.device, pred_full.dtype).expand(pred_full.size(0), -1, -1, -1)
-            else:
-                um = urban_mask.to(pred_full.device, pred_full.dtype)
+            # Use the same binary masks; recompute valid for pred
+            urb_bin = (um > 0.5)
+            rur_bin = ~urb_bin
+            valid_pred = torch.isfinite(pred_full_phys)
 
-            pred_urban = torch.where(um > 0.5, pred_full_phys, torch.tensor(float('nan'), device=pred_full.device, dtype=pred_full.dtype))
-            pred_rural = torch.where(um <= 0.5, pred_full_phys, torch.tensor(float('nan'), device=pred_full.device, dtype=pred_full.dtype))
-            pred_uhi = torch.nanmean(pred_urban.view(pred_full.size(0), -1), dim=1) - \
-                       torch.nanmean(pred_rural.view(pred_full.size(0), -1), dim=1)
+            urb_count_p = (urb_bin & valid_pred).sum(dim=(1,2,3)).clamp(min=1)
+            rur_count_p = (rur_bin & valid_pred).sum(dim=(1,2,3)).clamp(min=1)
+
+            pred_safe = torch.nan_to_num(pred_full_phys, nan=0.0, posinf=0.0, neginf=0.0)
+            urb_sum_p = (pred_safe * urb_bin).sum(dim=(1,2,3))
+            rur_sum_p = (pred_safe * rur_bin).sum(dim=(1,2,3))
+            pred_uhi = (urb_sum_p / urb_count_p) - (rur_sum_p / rur_count_p)   # (N,)
 
             if uhi_mode == "pct":
                 denom = torch.clamp(torch.abs(truth_uhi), min=uhi_min_denom_k)  # K
@@ -146,7 +158,7 @@ def compare_methods_fixed(
             RMSE_mean=RMSE_mean, RMSE_std=RMSE_std,
             PSNR_mean=PSNR_mean, PSNR_std=PSNR_std,
             SSIM_mean=SSIM_mean, SSIM_std=SSIM_std,
-            UHI_error_mean=UHI_err_mean,   # units depend on uhi_mode
+            UHI_error_mean=UHI_err_mean,
             UHI_error_std=UHI_err_std,
             UHI_error_mode=uhi_mode,
             N=int(pred_full.size(0)),
@@ -157,3 +169,4 @@ def compare_methods_fixed(
         "method","RMSE_mean","RMSE_std","PSNR_mean","PSNR_std","SSIM_mean","SSIM_std",
         "UHI_error_mean","UHI_error_std","UHI_error_mode","N","region"
     ])
+
