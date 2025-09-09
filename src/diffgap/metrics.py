@@ -1,65 +1,3 @@
-from __future__ import annotations
-from typing import Dict, Optional, Literal, Tuple
-import torch
-import pandas as pd
-from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
-
-
-def rmse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return torch.sqrt(torch.mean((x - y) ** 2))
-
-def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
-    mse = torch.mean((x - y) ** 2)
-    if mse <= 1e-20:
-        return torch.tensor(float("inf"), device=x.device)
-    return 20.0 * torch.log10(torch.tensor(data_range, device=x.device) / torch.sqrt(mse))
-
-def ssim(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
-    ssim_metric = SSIM(data_range=data_range)
-    return ssim_metric(x, y)
-
-def _mean_std_no_nan(t: torch.Tensor):
-    t = t.detach()
-    finite = torch.isfinite(t)
-    if not finite.any():
-        return float('nan'), float('nan')
-    vals = t[finite]
-    return float(vals.mean().cpu()), float(vals.std(unbiased=False).cpu())
-
-def _unnormalize(
-    x: torch.Tensor,
-    norm: str,
-    phys_minmax: Optional[Tuple[float,float]],
-    custom_minmax: Tuple[float,float]
-) -> torch.Tensor:
-    if phys_minmax is None:
-        return x
-    lo, hi = phys_minmax
-    if norm == "0_1":
-        return x * (hi - lo) + lo
-    elif norm in ("-1_1", "neg1_1"):
-        return ((x + 1.0) * 0.5) * (hi - lo) + lo
-    else:
-        # assume already physical (e.g., z-score)
-        return x
-
-def _compute_uhi(batch: torch.Tensor, urban_mask: torch.Tensor) -> torch.Tensor:
-    """
-    batch: (N,1,H,W) in physical units; urban_mask: (1,1,H,W) or (N,1,H,W) with 1=urban, 0=rural
-    returns per-image UHI = mean(urban) - mean(rural), shape (N,)
-    """
-    if urban_mask.dim() == 4 and urban_mask.size(0) == 1:
-        m = urban_mask.expand(batch.size(0), -1, -1, -1)
-    else:
-        m = urban_mask
-    m = m.to(batch.device, batch.dtype)
-
-    urban = torch.where(m > 0.5, batch, torch.tensor(float('nan'), device=batch.device, dtype=batch.dtype))
-    rural = torch.where(m <= 0.5, batch, torch.tensor(float('nan'), device=batch.device, dtype=batch.dtype))
-    urb_mean = torch.nanmean(urban.view(batch.size(0), -1), dim=1)
-    rur_mean = torch.nanmean(rural.view(batch.size(0), -1), dim=1)
-    return urb_mean - rur_mean
-
 @torch.no_grad()
 def compare_methods_fixed(
     truth: torch.Tensor,
@@ -85,12 +23,32 @@ def compare_methods_fixed(
     rows = []
     ssim_metric = SSIM(data_range=data_range).to(truth.device)
 
-    # Prepare full-frame truth for UHI (in physical units if requested)
+    # ---- Prepare full-frame truth for UHI (unnormalize inline if requested) ----
     if urban_mask is not None:
-        truth_full_phys = _unnormalize(truth, norm=norm, phys_minmax=uhi_phys_minmax, custom_minmax=custom_minmax)
-        truth_uhi = _compute_uhi(truth_full_phys, urban_mask)  # (N,)
+        if uhi_phys_minmax is not None:
+            lo, hi = uhi_phys_minmax
+            if norm == "0_1":
+                truth_full_phys = truth * (hi - lo) + lo
+            elif norm in ("-1_1", "neg1_1"):
+                truth_full_phys = ((truth + 1.0) * 0.5) * (hi - lo) + lo
+            else:
+                truth_full_phys = truth  # assume already physical units
+        else:
+            truth_full_phys = truth  # already in physical units
+
+        # Broadcast urban mask to batch if needed
+        if urban_mask.dim() == 4 and urban_mask.size(0) == 1:
+            um = urban_mask.to(truth.device, truth.dtype).expand(truth.size(0), -1, -1, -1)
+        else:
+            um = urban_mask.to(truth.device, truth.dtype)
+
+        # Compute truth UHI per image: mean(urban) - mean(rural)
+        truth_urban = torch.where(um > 0.5, truth_full_phys, torch.tensor(float('nan'), device=truth.device, dtype=truth.dtype))
+        truth_rural = torch.where(um <= 0.5, truth_full_phys, torch.tensor(float('nan'), device=truth.device, dtype=truth.dtype))
+        truth_uhi = torch.nanmean(truth_urban.view(truth.size(0), -1), dim=1) - \
+                    torch.nanmean(truth_rural.view(truth.size(0), -1), dim=1)
     else:
-        truth_uhi = None
+        truth_uhi = None  # no UHI metrics
 
     for name, pred_full in predictions.items():
         # ------------- Pixel metrics on region -------------
@@ -116,8 +74,28 @@ def compare_methods_fixed(
 
         # ------------- UHI on FULL frames (not region-masked) -------------
         if truth_uhi is not None:
-            pred_full_phys = _unnormalize(pred_full, norm=norm, phys_minmax=uhi_phys_minmax, custom_minmax=custom_minmax)
-            pred_uhi = _compute_uhi(pred_full_phys, urban_mask)  # (N,)
+            # Unnormalize prediction inline if requested
+            if uhi_phys_minmax is not None:
+                lo, hi = uhi_phys_minmax
+                if norm == "0_1":
+                    pred_full_phys = pred_full * (hi - lo) + lo
+                elif norm in ("-1_1", "neg1_1"):
+                    pred_full_phys = ((pred_full + 1.0) * 0.5) * (hi - lo) + lo
+                else:
+                    pred_full_phys = pred_full
+            else:
+                pred_full_phys = pred_full
+
+            # Broadcast mask like above
+            if urban_mask.dim() == 4 and urban_mask.size(0) == 1:
+                um = urban_mask.to(pred_full.device, pred_full.dtype).expand(pred_full.size(0), -1, -1, -1)
+            else:
+                um = urban_mask.to(pred_full.device, pred_full.dtype)
+
+            pred_urban = torch.where(um > 0.5, pred_full_phys, torch.tensor(float('nan'), device=pred_full.device, dtype=pred_full.dtype))
+            pred_rural = torch.where(um <= 0.5, pred_full_phys, torch.tensor(float('nan'), device=pred_full.device, dtype=pred_full.dtype))
+            pred_uhi = torch.nanmean(pred_urban.view(pred_full.size(0), -1), dim=1) - \
+                       torch.nanmean(pred_rural.view(pred_full.size(0), -1), dim=1)
 
             if uhi_mode == "pct":
                 denom = torch.clamp(torch.abs(truth_uhi), min=uhi_min_denom_k)  # K
@@ -137,7 +115,7 @@ def compare_methods_fixed(
             RMSE_mean=RMSE_mean, RMSE_std=RMSE_std,
             PSNR_mean=PSNR_mean, PSNR_std=PSNR_std,
             SSIM_mean=SSIM_mean, SSIM_std=SSIM_std,
-            UHI_error_mean=UHI_err_mean,  # units depend on uhi_mode
+            UHI_error_mean=UHI_err_mean,   # units depend on uhi_mode
             UHI_error_std=UHI_err_std,
             UHI_error_mode=uhi_mode,
             N=int(pred_full.size(0)),
