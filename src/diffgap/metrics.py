@@ -1,3 +1,34 @@
+
+from __future__ import annotations
+from typing import Dict, Optional, Literal, Tuple
+import torch
+import pandas as pd
+from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
+
+
+def rmse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return torch.sqrt(torch.mean((x - y) ** 2))
+
+def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
+    mse = torch.mean((x - y) ** 2)
+    if mse <= 1e-20:
+        return torch.tensor(float("inf"), device=x.device)
+    return 20.0 * torch.log10(torch.tensor(data_range, device=x.device) / torch.sqrt(mse))
+
+def ssim(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
+    ssim_metric = SSIM(data_range=data_range)
+    return ssim_metric(x, y)
+
+def _mean_std_no_nan(t: torch.Tensor):
+    t = t.detach()
+    finite = torch.isfinite(t)
+    if not finite.any():
+        return float('nan'), float('nan')
+    vals = t[finite]
+    return float(vals.mean().cpu()), float(vals.std(unbiased=False).cpu())
+
+
+
 @torch.no_grad()
 def compare_methods_fixed(
     truth: torch.Tensor,
