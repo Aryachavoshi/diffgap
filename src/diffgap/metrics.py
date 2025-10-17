@@ -9,13 +9,13 @@ from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
 def rmse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(torch.mean((x - y) ** 2))
 
-def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
+def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0) -> torch.Tensor:
     mse = torch.mean((x - y) ** 2)
     if mse <= 1e-20:
         return torch.tensor(float("inf"), device=x.device)
     return 20.0 * torch.log10(torch.tensor(data_range, device=x.device) / torch.sqrt(mse))
 
-def ssim(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
+def ssim(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0) -> torch.Tensor:
     ssim_metric = SSIM(data_range=data_range)
     return ssim_metric(x, y)
 
@@ -49,8 +49,8 @@ def compare_methods_fixed(
     UHI metrics computed on FULL frames (unmasked), independent of `region`.
     """
     from diffgap.utils import apply_region, data_range_from_normalization
-    data_range = data_range_from_normalization(norm, *custom_minmax)
-
+    #data_range = data_range_from_normalization(norm, *custom_minmax)
+    data_range = 2.0
     rows = []
     ssim_metric = SSIM(data_range=data_range).to(truth.device)
 
@@ -169,4 +169,3 @@ def compare_methods_fixed(
         "method","RMSE_mean","RMSE_std","PSNR_mean","PSNR_std","SSIM_mean","SSIM_std",
         "UHI_error_mean","UHI_error_std","UHI_error_mode","N","region"
     ])
-
