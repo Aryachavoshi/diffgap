@@ -174,11 +174,6 @@ class DiffusionSampler(nn.Module):
             print(f"   Scheduler step done for t={t_idx_scalar}")
 
         return x_t.detach(), intermediates
-from __future__ import annotations
-import contextlib
-import torch
-import torch.nn as nn
-from typing import List, Tuple, Optional
 
 class ConditionalDiffusionSampler(nn.Module):
     """
