@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 import cv2
 
-class InpaintingDataset(Dataset):
+class ConditionalInpaintingDataset(Dataset):
     """
     Wraps grayscale images (N,H,W) into (N,1,H,W) tensors and produces masks.
     mask_type ∈ {"rectangle","banded","irregular","random_percentage","half","cloud_fbm"}
@@ -16,12 +16,18 @@ class InpaintingDataset(Dataset):
     def __init__(
         self,
         images: np.ndarray,
+        conds: np.ndarray,
+        elevations: np.ndarray,
+        city_names: List[str],
         mask_type: str = "rectangle",
         mask_generator: Optional[Callable] = None,
         mask_percentage: float = 0.3,
         mask_kwargs: Optional[Dict] = None,
     ):
         self.images = torch.from_numpy(images).float().unsqueeze(1)  # (N,1,H,W)
+        self.conds = torch.from_numpy(conds).float()
+        self.elevations = torch.from_numpy(elevations).float()
+        self.city_names = city_names
         self.mask_type = mask_type
         self.mask_percentage = float(mask_percentage)
         self.mask_kwargs = mask_kwargs or {}
@@ -107,8 +113,8 @@ class InpaintingDataset(Dataset):
             g.manual_seed(int(seed))
         noise = torch.zeros(1, 1, h, w)
         amp = 1.0
-        for o in range(octaves):
-            scale = lacunarity ** (octaves - 1 - o)
+        for _ in range(octaves):
+            scale = lacunarity ** (octaves - 1 - _)
             hh = max(1, int(round(h / scale)))
             ww = max(1, int(round(w / scale)))
             n = torch.randn(1, 1, hh, ww, generator=g)
@@ -122,7 +128,7 @@ class InpaintingDataset(Dataset):
         h, w = img.shape
         M = cv2.getRotationMatrix2D((w/2, h/2), angle_deg, 1.0)
         rot = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        blurred = cv2.GaussianBlur(rot, ksize=(0,0), sigmaX=sigma_x, sigmaY=sigma_y, borderType=cv2.BORDER_REFLECT)
+        blurred = cv2.GaussianBlur(rot, ksize=(0, 0), sigmaX=sigma_x, sigmaY=sigma_y, borderType=cv2.BORDER_REFLECT)
         M_inv = cv2.getRotationMatrix2D((w/2, h/2), -angle_deg, 1.0)
         return cv2.warpAffine(blurred, M_inv, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
@@ -142,21 +148,21 @@ class InpaintingDataset(Dataset):
         h, w = image.shape[-2:]
         n = self._fbm_noise(h, w, octaves=octaves, persistence=persistence, lacunarity=lacunarity, seed=seed)
         if style == "cumulus":
-            n = cv2.GaussianBlur(n, (0,0), sigmaX=0.6, sigmaY=0.6)
+            n = cv2.GaussianBlur(n, (0, 0), sigmaX=0.6, sigmaY=0.6)
         elif style == "stratus":
-            n = cv2.GaussianBlur(n, (0,0), sigmaX=2.5, sigmaY=1.0)
+            n = cv2.GaussianBlur(n, (0, 0), sigmaX=2.5, sigmaY=1.0)
             if streak > 0:
-                n = self._anisotropic_blur(n, sigma_x=6.0*streak + 1e-6, sigma_y=1.0, angle_deg=wind_dir_deg)
+                n = self._anisotropic_blur(n, sigma_x=6.0 * streak + 1e-6, sigma_y=1.0, angle_deg=wind_dir_deg)
         elif style == "cirrus":
             n = (n - n.min()) / (n.max() - n.min() + 1e-8)
-            n = cv2.GaussianBlur(n, (0,0), sigmaX=0.3, sigmaY=0.3)
+            n = cv2.GaussianBlur(n, (0, 0), sigmaX=0.3, sigmaY=0.3)
             if streak > 0:
-                n = self._anisotropic_blur(n, sigma_x=3.0*streak + 1e-6, sigma_y=0.6, angle_deg=wind_dir_deg)
+                n = self._anisotropic_blur(n, sigma_x=3.0 * streak + 1e-6, sigma_y=0.6, angle_deg=wind_dir_deg)
 
         thr = float(np.quantile(n, 1.0 - float(coverage)))
         cloud = (n >= thr).astype(np.uint8)
         if morph_puff > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             cloud = cv2.morphologyEx(cloud, cv2.MORPH_CLOSE, k, iterations=int(morph_puff))
         mask_np = 1.0 - cloud.astype(np.float32)  # 1 keep, 0 cloud
         return torch.from_numpy(mask_np).view(1, h, w)
@@ -167,6 +173,17 @@ class InpaintingDataset(Dataset):
 
     def __getitem__(self, idx: int):
         image = self.images[idx]
+        conds = self.conds[idx]
+        elevations = self.elevations[idx]
+        city_name = self.city_names[idx]
         mask = self.mask_generator(image)
         revealed = image * mask
-        return {"image": image, "revealed": revealed, "mask": mask}
+        return {
+            "image": image,
+            "revealed": revealed,
+            "mask": mask,
+            "cond": conds,
+            "elevations": elevations,
+            "city_names": city_name,
+        }
+
