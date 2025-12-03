@@ -8,7 +8,7 @@ from .metrics import psnr, ssim, rmse, compare_methods_fixed
 __all__ = [
     "DiffusionSampler",
     "ConditionalDiffusionSampler",
-    "InpaintingDataset",
+    "ConditionalInpaintingDataset",
     "inpaint_opencv_batch",
     "linear_interp2d_batch",
     "denoise_batch",
