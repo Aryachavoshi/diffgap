@@ -51,6 +51,7 @@ class ConditionalDiffusionSampler(nn.Module):
         revealed_image: torch.Tensor,
         masks: torch.Tensor,
         conds: torch.Tensor,
+        elevs: torch.Tensor,
         timesteps: int = 20,
         grad_steps: int = 5,
         learning_rate: float = 0.1,
@@ -79,6 +80,9 @@ class ConditionalDiffusionSampler(nn.Module):
         if conds.dim() == 3:
             conds = conds.unsqueeze(1)
         conds = conds.to(self.device)
+        if elevs.dim() == 3:
+            elevs = elevs.unsqueeze(1)
+        elevs = elevs.to(self.device)
 
 
         # ---- Initialize x_t ----
@@ -112,7 +116,7 @@ class ConditionalDiffusionSampler(nn.Module):
             if do_guidance_now and grad_steps > 0:
                 for g in range(grad_steps):
                     with amp_ctx():
-                        inp = torch.concat([x_t, conds], dim=1)
+                        inp = torch.concat([x_t, conds, elevs], dim=1)
                         eps_pred = self.trained_model(inp, t_tensor).sample
                         x0_pred  = self.eps_to_x0(x_t, t_idx_scalar, eps_pred)
                         pred_revealed = x0_pred * masks
@@ -130,7 +134,7 @@ class ConditionalDiffusionSampler(nn.Module):
 
             # scheduler step x_t -> x_{t-1}
             with torch.no_grad(), amp_ctx():
-                inp = torch.concat([x_t, conds], dim=1)
+                inp = torch.concat([x_t, conds, elevs], dim=1)
                 eps_pred = self.trained_model(inp, t_tensor).sample
                 step_out = scheduler.step(eps_pred, t, x_t)
                 x_t = step_out.prev_sample
