@@ -94,7 +94,7 @@ with open(cmd_file, "w") as f:
             f"--num_processes 1 "
             f"--mixed_precision no "
             f"--dynamo_backend no "
-            f"one_config_inference.py "
+            f"one_cloud_config_inference.py "
             f"--data_path \"{data_path}\" "
             f"--ckpt \"{ckpt_path}\" "
             f"--output_dir \"{outdir}\" "
