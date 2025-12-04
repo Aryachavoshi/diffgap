@@ -105,11 +105,11 @@ def mix(diff_reconstructed, ground_truth, ground_revealed, masks, coef=1.0):
 
     mixed = (coef * diff_reconstructed + (1 - coef) * baseline) * (1 - mask) + ground_revealed
 
-    complete_prediction = denoise_batch(complete_prediction, "gaussian", 7, 1)
-    ground_truth = denoise_batch(ground_truth, "gaussian", 3, 1)
-    baseline = denoise_batch(baseline, "gaussian", 3, 1)
-    baseline_lr = denoise_batch(baseline_lr, "gaussian", 3, 1)
-    mixed = denoise_batch(mixed, "gaussian", 7, 1)
+    complete_prediction = denoise_batch(complete_prediction)
+    ground_truth = denoise_batch(ground_truth)
+    baseline = denoise_batch(baseline)
+    baseline_lr = denoise_batch(baseline_lr)
+    mixed = denoise_batch(mixed)
 
     return {
         "raw_diffusion_prediction": complete_prediction,
